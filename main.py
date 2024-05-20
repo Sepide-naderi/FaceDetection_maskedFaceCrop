@@ -1,83 +1,155 @@
 import cv2
-import mediapipe
+import mediapipe as mp
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog
 import os
 import matplotlib.pyplot as plt
-import pandas as pd
 
 # Create a Tkinter window
 root = tk.Tk()
 # Hide the main window
 root.withdraw()
 
-file_path = filedialog.askopenfilename(title="Select Image File", filetypes=(("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.jfif"),
-                                                                             ("All files", "*.*")))
-# Load the image
-image = cv2.imread(file_path)
+# Ask the user to select an image file for their face
+user_face_path = filedialog.askopenfilename(title="Select Your Face Image",
+                                            filetypes=(("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.jfif"),
+                                                       ("All files", "*.*")))
 
-image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+# Ask the user to select an image file for the skin
+skin_face_path = filedialog.askopenfilename(title="Select Skin Face Image",
+                                            filetypes=(("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.jfif"),
+                                                       ("All files", "*.*")))
+# Load the images
+user_face_image = cv2.imread(user_face_path)
+skin_face_image = cv2.imread(skin_face_path)
 
-mp_face_mesh = mediapipe.solutions.face_mesh
+user_face_image_rgb = cv2.cvtColor(user_face_image, cv2.COLOR_BGR2RGB)
+skin_face_image_rgb = cv2.cvtColor(skin_face_image, cv2.COLOR_BGR2RGB)
+
+# Initialize Mediapipe FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
-results = face_mesh.process(image[:,:,::-1])
 
-landmarks = results.multi_face_landmarks[0]
+# Process the images to get landmarks
+user_face_results = face_mesh.process(user_face_image_rgb)
+skin_face_results = face_mesh.process(skin_face_image_rgb)
 
-face_oval = mp_face_mesh.FACEMESH_FACE_OVAL
+# If no faces are detected in either image, exit the program
+if not user_face_results.multi_face_landmarks or not skin_face_results.multi_face_landmarks:
+    print("No face detected in one or both of the images.")
+    exit()
 
-
-df = pd.DataFrame(list(face_oval), columns= ['p1', 'p2'])
-
-routes_index = []
-
-p1 = df.iloc[0]['p1']
-p2 = df.iloc[0]['p2']
-
-for i in range(0, df.shape[0]):
-    obj = df[df['p1'] == p2]
-    p1 = obj['p1'].values[0]
-    p2 = obj['p2'].values[0]
-
-    curr_route = []
-    curr_route.append(p1)
-    curr_route.append(p2)
-    routes_index.append(curr_route)
+user_face_landmarks = user_face_results.multi_face_landmarks[0].landmark
+skin_face_landmarks = skin_face_results.multi_face_landmarks[0].landmark
 
 
-for route_index in routes_index:
-    print(f'draw a line from {routes_index[0]} landmark point to {routes_index[1]} landmark point')
-
-routes = []
-for src_index, target_index in routes_index:
-    source = landmarks.landmark[src_index]
-    target = landmarks.landmark[target_index]
-
-    relative_source = int(source.x * image.shape[1]), int(source.y * image.shape[0])
-    relative_target = int(target.x * image.shape[1]), int(target.y * image.shape[0])
-
-    routes.append(relative_source)
-    routes.append(relative_target)
+# Convert landmarks to numpy array
+def landmarks_to_array(landmarks, image_shape):
+    return np.array([(int(landmark.x * image_shape[1]),
+                      int(landmark.y * image_shape[0]))
+                     for landmark in landmarks])
 
 
-mask = np.zeros((image.shape[0], image.shape[1]))
-mask = cv2.fillConvexPoly(mask, np.array(routes), 1)
-mask = mask.astype(bool)
+user_face_points = landmarks_to_array(user_face_landmarks, user_face_image.shape)
+skin_face_points = landmarks_to_array(skin_face_landmarks, skin_face_image.shape)
 
-out = np.zeros_like(image)
-out[mask] = image[mask]
 
+# Calculate the Delaunay triangulation for the skin face
+def calculate_delaunay_triangles(rect, points):
+    subdiv = cv2.Subdiv2D(rect)
+    for point in points:
+        point_int = (int(point[0]), int(point[1]))
+        subdiv.insert(point_int)
+    triangle_list = subdiv.getTriangleList()
+    delaunay_triangles = []
+    for t in triangle_list:
+        pt1 = (t[0], t[1])
+        pt2 = (t[2], t[3])
+        pt3 = (t[4], t[5])
+        # if all points are within the image bounds
+        if (rect[0] <= pt1[0] <= rect[0] + rect[2] and
+                rect[1] <= pt1[1] <= rect[1] + rect[3] and
+                rect[0] <= pt2[0] <= rect[0] + rect[2] and
+                rect[1] <= pt2[1] <= rect[1] + rect[3] and
+                rect[0] <= pt3[0] <= rect[0] + rect[2] and
+                rect[1] <= pt3[1] <= rect[1] + rect[3]):
+            index = []
+            for j in range(3):
+                for k in range(len(points)):
+                    if abs(pt1[0] - points[k][0]) < 1 and abs(pt1[1] - points[k][1]) < 1:
+                        index.append(k)
+                pt1 = pt2
+                pt2 = pt3
+            if len(index) == 3:
+                delaunay_triangles.append((index[0], index[1], index[2]))
+    return delaunay_triangles
+
+
+rect = (0, 0, skin_face_image.shape[1], skin_face_image.shape[0])
+delaunay_triangles = calculate_delaunay_triangles(rect, skin_face_points)
+
+
+# Warp the triangles from user face to skin face
+def apply_affine_transform(src, src_tri, dst_tri, size):
+    warp_mat = cv2.getAffineTransform(np.float32(src_tri), np.float32(dst_tri))
+    dst = cv2.warpAffine(src, warp_mat, (size[0], size[1]), None, flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REFLECT_101)
+    return dst
+
+
+def warp_triangle(img1, img2, t1, t2):
+    r1 = cv2.boundingRect(np.float32([t1]))
+    r2 = cv2.boundingRect(np.float32([t2]))
+
+    x1, y1, w1, h1 = r1
+    x2, y2, w2, h2 = r2
+
+    t1_rect = []
+    t2_rect = []
+    t2_rect_int = []
+
+    for i in range(3):
+        t1_rect.append(((t1[i][0] - x1), (t1[i][1] - y1)))
+        t2_rect.append(((t2[i][0] - x2), (t2[i][1] - y2)))
+        t2_rect_int.append(((t2[i][0] - x2), (t2[i][1] - y2)))
+
+    img1_rect = img1[y1:y1 + h1, x1:x1 + w1]
+    size = (w2, h2)
+    img2_rect = apply_affine_transform(img1_rect, t1_rect, t2_rect, size)
+
+    mask = np.zeros((h2, w2, 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(t2_rect_int), (1.0, 1.0, 1.0), 16, 0)
+
+    img2[y2:y2 + h2, x2:x2 + w2] = img2[y2:y2 + h2, x2:x2 + w2] * (1 - mask) + img2_rect * mask
+
+
+# Copy triangle
+img_skin_face = np.copy(skin_face_image_rgb)
+for triangle in delaunay_triangles:
+    t1 = [user_face_points[triangle[0]], user_face_points[triangle[1]], user_face_points[triangle[2]]]
+    t2 = [skin_face_points[triangle[0]], skin_face_points[triangle[1]], skin_face_points[triangle[2]]]
+    warp_triangle(user_face_image_rgb, img_skin_face, t1, t2)
+
+# Save the final image
 directory = os.path.dirname('Outputs/')
-filename = os.path.basename(file_path)
+os.makedirs(directory, exist_ok=True)
+filename = os.path.basename(user_face_path)
+output_filename = "cropped_face_" + filename
+cv2.imwrite(os.path.join(directory, output_filename), cv2.cvtColor(img_skin_face, cv2.COLOR_RGB2BGR))
 
-# Generate a new filename
-new_filename = "croppedFace_" + filename
+# Display the final result
+plt.figure(figsize=(10, 10))
+plt.imshow(img_skin_face)
+plt.title("Final Skin Face")
+plt.axis('off')
+plt.show()
 
-# Save the masked image
-cv2.imwrite(os.path.join(directory, new_filename), out[:,:,::-1])
+# Clean up temporary image
+if os.path.exists(os.path.join('Images', filename)):
+    os.remove(os.path.join('Images', filename))
 
-# Display the masked image
-cv2.imshow("Masked Face", out[:,:,::-1])
+# Display the result in OpenCV window
+cv2.imshow("Final Skin Face", cv2.cvtColor(img_skin_face, cv2.COLOR_RGB2BGR))
 cv2.waitKey(0)
 cv2.destroyAllWindows()
