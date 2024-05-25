@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import filedialog
 import os
 import matplotlib.pyplot as plt
+import datetime
 
 # Create a Tkinter window
 root = tk.Tk()
@@ -16,33 +17,25 @@ user_face_path = filedialog.askopenfilename(title="Select Your Face Image",
                                             filetypes=(("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.jfif"),
                                                        ("All files", "*.*")))
 
-# Ask the user to select an image file for the skin
-skin_face_path = filedialog.askopenfilename(title="Select Skin Face Image",
-                                            filetypes=(("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.jfif"),
-                                                       ("All files", "*.*")))
+# Ask the user to select a folder for skin faces
+skin_faces_folder = filedialog.askdirectory(title="Select Folder Skin Faces")
 
-# Load the images
+# Load the user's face image
 user_face_image = cv2.imread(user_face_path)
-skin_face_image = cv2.imread(skin_face_path)
-
 user_face_image_rgb = cv2.cvtColor(user_face_image, cv2.COLOR_BGR2RGB)
-skin_face_image_rgb = cv2.cvtColor(skin_face_image, cv2.COLOR_BGR2RGB)
 
 # Initialize Mediapipe FaceMesh
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
 
-# Process the images to get landmarks
+# Process the user's face image to get landmarks
 user_face_results = face_mesh.process(user_face_image_rgb)
-skin_face_results = face_mesh.process(skin_face_image_rgb)
-
-# If no faces are detected in either image, exit the program
-if not user_face_results.multi_face_landmarks or not skin_face_results.multi_face_landmarks:
-    print("No face detected in one or both of the images.")
+if not user_face_results.multi_face_landmarks:
+    print("No face detected in the user's image.")
     exit()
 
 user_face_landmarks = user_face_results.multi_face_landmarks[0].landmark
-skin_face_landmarks = skin_face_results.multi_face_landmarks[0].landmark
+
 
 # Convert landmarks to numpy array
 def landmarks_to_array(landmarks, image_shape):
@@ -50,10 +43,11 @@ def landmarks_to_array(landmarks, image_shape):
                       int(landmark.y * image_shape[0]))
                      for landmark in landmarks])
 
-user_face_points = landmarks_to_array(user_face_landmarks, user_face_image.shape)
-skin_face_points = landmarks_to_array(skin_face_landmarks, skin_face_image.shape)
 
-#Delaunay triangulation for the skin face
+user_face_points = landmarks_to_array(user_face_landmarks, user_face_image.shape)
+
+
+# Delaunay triangulation function
 def calculate_delaunay_triangles(rect, points):
     subdiv = cv2.Subdiv2D(rect)
     for point in points:
@@ -82,8 +76,6 @@ def calculate_delaunay_triangles(rect, points):
                 delaunay_triangles.append((index[0], index[1], index[2]))
     return delaunay_triangles
 
-rect = (0, 0, skin_face_image.shape[1], skin_face_image.shape[0])
-delaunay_triangles = calculate_delaunay_triangles(rect, skin_face_points)
 
 # Warp the triangles from user face to skin face
 def apply_affine_transform(src, src_tri, dst_tri, size):
@@ -91,6 +83,7 @@ def apply_affine_transform(src, src_tri, dst_tri, size):
     dst = cv2.warpAffine(src, warp_mat, (size[0], size[1]), None, flags=cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_REFLECT_101)
     return dst
+
 
 def warp_triangle(img1, img2, t1, t2):
     r1 = cv2.boundingRect(np.float32([t1]))
@@ -117,6 +110,7 @@ def warp_triangle(img1, img2, t1, t2):
 
     img2[y2:y2 + h2, x2:x2 + w2] = img2[y2:y2 + h2, x2:x2 + w2] * (1 - mask) + img2_rect * mask
 
+
 # Create a mask for the face
 def create_face_mask(image, landmarks):
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -127,56 +121,83 @@ def create_face_mask(image, landmarks):
     cv2.fillConvexPoly(mask, convexhull, 255)
     return mask
 
-# Create masks for user face and skin face
+
+# Create mask for user face
 user_face_mask = create_face_mask(user_face_image, user_face_landmarks)
-skin_face_mask = create_face_mask(skin_face_image, skin_face_landmarks)
 
-# check if the mask is in the correct shape
-if len(skin_face_mask.shape) == 2:
-    skin_face_mask = cv2.cvtColor(skin_face_mask, cv2.COLOR_GRAY2BGR)
+# Process each skin face image in the folder
+for skin_face_filename in os.listdir(skin_faces_folder):
+    skin_face_path = os.path.join(skin_faces_folder, skin_face_filename)
+    if not os.path.isfile(skin_face_path):
+        continue
 
-# Copy triangle
-img_skin_face = np.copy(skin_face_image_rgb)
-for triangle in delaunay_triangles:
-    t1 = [user_face_points[triangle[0]], user_face_points[triangle[1]], user_face_points[triangle[2]]]
-    t2 = [skin_face_points[triangle[0]], skin_face_points[triangle[1]], skin_face_points[triangle[2]]]
-    warp_triangle(user_face_image_rgb, img_skin_face, t1, t2)
+    # Load the skin face image
+    skin_face_image = cv2.imread(skin_face_path)
+    skin_face_image_rgb = cv2.cvtColor(skin_face_image, cv2.COLOR_BGR2RGB)
 
-# Feather the edges of the face mask(more ksize->smoother edges)
-face_mask = cv2.GaussianBlur(skin_face_mask, (101, 101), 5)
+    # Process the skin face image to get landmarks
+    skin_face_results = face_mesh.process(skin_face_image_rgb)
+    if not skin_face_results.multi_face_landmarks:
+        print(f"No face detected in the skin image: {skin_face_filename}")
+        continue
 
-# Find the center of the face in the skin image for seamless cloning
-def find_face_center(landmarks):
-    x_coords = [landmark.x for landmark in landmarks]
-    y_coords = [landmark.y for landmark in landmarks]
-    center_x = int(np.mean(x_coords) * skin_face_image.shape[1])
-    center_y = int(np.mean(y_coords) * skin_face_image.shape[0])
-    return (center_x, center_y)
+    skin_face_landmarks = skin_face_results.multi_face_landmarks[0].landmark
+    skin_face_points = landmarks_to_array(skin_face_landmarks, skin_face_image.shape)
 
-center_point = find_face_center(skin_face_landmarks)
+    # Calculate Delaunay triangles for the skin face
+    rect = (0, 0, skin_face_image.shape[1], skin_face_image.shape[0])
+    delaunay_triangles = calculate_delaunay_triangles(rect, skin_face_points)
 
-# Blend the images
-result = cv2.seamlessClone(img_skin_face, skin_face_image_rgb, face_mask, center_point, cv2.NORMAL_CLONE)
+    # Copy triangle
+    img_skin_face = np.copy(skin_face_image_rgb)
+    for triangle in delaunay_triangles:
+        t1 = [user_face_points[triangle[0]], user_face_points[triangle[1]], user_face_points[triangle[2]]]
+        t2 = [skin_face_points[triangle[0]], skin_face_points[triangle[1]], skin_face_points[triangle[2]]]
+        warp_triangle(user_face_image_rgb, img_skin_face, t1, t2)
 
-# Save the final image
-directory = os.path.dirname('Outputs/')
-os.makedirs(directory, exist_ok=True)
-filename = os.path.basename(user_face_path)
-output_filename = "cropped_face_" + filename
-cv2.imwrite(os.path.join(directory, output_filename), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+    # Create mask for the skin face
+    skin_face_mask = create_face_mask(skin_face_image, skin_face_landmarks)
 
-# Display the final result
-plt.figure(figsize=(10, 10))
-plt.imshow(result)
-plt.title("Combined Face")
-plt.axis('off')
-plt.show()
+    # Check if the mask is in the correct shape
+    if len(skin_face_mask.shape) == 2:
+        skin_face_mask = cv2.cvtColor(skin_face_mask, cv2.COLOR_GRAY2BGR)
 
-# Clean up temporary image
-if os.path.exists(os.path.join('Images', filename)):
-    os.remove(os.path.join('Images', filename))
+    # Feather the edges of the face mask (more ksize->smoother edges)
+    face_mask = cv2.GaussianBlur(skin_face_mask, (101, 101), 5)
 
-# Display the result in OpenCV window
-cv2.imshow("Final Skin Face", cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
-cv2.waitKey(0)
+
+    # Find the center of the face in the skin image for seamless cloning
+    def find_face_center(landmarks):
+        x_coords = [landmark.x for landmark in landmarks]
+        y_coords = [landmark.y for landmark in landmarks]
+        center_x = int(np.mean(x_coords) * skin_face_image.shape[1])
+        center_y = int(np.mean(y_coords) * skin_face_image.shape[0])
+        return (center_x, center_y)
+
+
+    center_point = find_face_center(skin_face_landmarks)
+
+    # Blend the images
+    result = cv2.seamlessClone(img_skin_face, skin_face_image_rgb, face_mask, center_point, cv2.NORMAL_CLONE)
+
+    # Save the final image
+    filename = os.path.basename(user_face_path)
+    directory = os.path.join('Outputs/')
+    os.makedirs(directory, exist_ok=True)
+    # Use datetime(timestamp) for a unique identifier for final images
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_filename = f"final_face_{timestamp}_{os.path.basename(skin_face_path)}"
+    cv2.imwrite(os.path.join(directory, output_filename), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+
+    # Clean up temporary image
+    if os.path.exists(os.path.join('Images', filename)):
+        os.remove(os.path.join('Images', filename))
+
+    # Display the final result
+    plt.figure(figsize=(10, 10))
+    plt.imshow(result)
+    plt.title(f"final Face - {skin_face_filename}")
+    plt.axis('off')
+    plt.show()
+
 cv2.destroyAllWindows()
