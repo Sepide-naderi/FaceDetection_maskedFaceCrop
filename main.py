@@ -204,9 +204,9 @@ while True:
             # Blend the images
             result = cv2.seamlessClone(img_skin_face, skin_face_image_rgb, face_mask, center_point, cv2.NORMAL_CLONE)
 
-            # Check if the skin face filename is '125.png' and flip the result horizontally
+            # if the skin face filename is '125.png' rotate it
             if skin_face_data["filename"] == '125.png':
-                result = cv2.rotate(result, cv2.ROTATE_180)  # 1 indicates flipping around y-axis (horizontal flip)
+                result = cv2.rotate(result, cv2.ROTATE_180)
 
             # Create output directory if it does not exist
             output_directory = 'Outputs/'
