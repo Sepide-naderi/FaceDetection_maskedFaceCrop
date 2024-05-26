@@ -5,7 +5,6 @@ import tkinter as tk
 from tkinter import filedialog
 import os
 import matplotlib.pyplot as plt
-import datetime
 import time
 
 # Create a Tkinter window
@@ -13,8 +12,22 @@ root = tk.Tk()
 # Hide the main window
 root.withdraw()
 
-# Ask the user to select a folder for skin faces
-skin_faces_folder = filedialog.askdirectory(title="Select Folder Skin Faces")
+# File to store the skin faces folder path
+config_file = 'skin_faces_folder.txt'
+
+def get_skin_faces_folder():
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as file:
+            folder_path = file.readline().strip()
+            if os.path.exists(folder_path):
+                return folder_path
+    folder_path = filedialog.askdirectory(title="Select Folder Skin Faces")
+    with open(config_file, 'w') as file:
+        file.write(folder_path)
+    return folder_path
+
+# Get the skin faces folder
+skin_faces_folder = get_skin_faces_folder()
 
 # Initialize Mediapipe FaceMesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -108,6 +121,39 @@ def find_face_center(landmarks, image_shape):
     center_y = int(np.mean(y_coords) * image_shape[0])
     return (center_x, center_y)
 
+# Process each skin face image in the folder and store the data
+skin_faces_data = []
+for skin_face_filename in os.listdir(skin_faces_folder):
+    skin_face_path = os.path.join(skin_faces_folder, skin_face_filename)
+    if not os.path.isfile(skin_face_path):
+        continue
+
+    # Load the skin face image
+    skin_face_image = cv2.imread(skin_face_path)
+    skin_face_image_rgb = cv2.cvtColor(skin_face_image, cv2.COLOR_BGR2RGB)
+
+    # Process the skin face image to get landmarks
+    skin_face_results = face_mesh.process(skin_face_image_rgb)
+    if not skin_face_results.multi_face_landmarks:
+        print(f"No face detected in the skin image: {skin_face_filename}")
+        continue
+
+    skin_face_landmarks = skin_face_results.multi_face_landmarks[0].landmark
+    skin_face_points = landmarks_to_array(skin_face_landmarks, skin_face_image.shape)
+
+    # Calculate Delaunay triangles for the skin face
+    rect = (0, 0, skin_face_image.shape[1], skin_face_image.shape[0])
+    delaunay_triangles = calculate_delaunay_triangles(rect, skin_face_points)
+
+    skin_faces_data.append({
+        "filename": skin_face_filename,
+        "image": skin_face_image,
+        "image_rgb": skin_face_image_rgb,
+        "landmarks": skin_face_landmarks,
+        "points": skin_face_points,
+        "delaunay_triangles": delaunay_triangles
+    })
+
 # check for new images every 10 seconds
 while True:
     # Check if there are any images in the Images folder
@@ -130,28 +176,11 @@ while True:
         user_face_landmarks = user_face_results.multi_face_landmarks[0].landmark
         user_face_points = landmarks_to_array(user_face_landmarks, user_face_image.shape)
 
-        # Process each skin face image in the folder
-        for skin_face_filename in os.listdir(skin_faces_folder):
-            skin_face_path = os.path.join(skin_faces_folder, skin_face_filename)
-            if not os.path.isfile(skin_face_path):
-                continue
-
-            # Load the skin face image
-            skin_face_image = cv2.imread(skin_face_path)
-            skin_face_image_rgb = cv2.cvtColor(skin_face_image, cv2.COLOR_BGR2RGB)
-
-            # Process the skin face image to get landmarks
-            skin_face_results = face_mesh.process(skin_face_image_rgb)
-            if not skin_face_results.multi_face_landmarks:
-                print(f"No face detected in the skin image: {skin_face_filename}")
-                continue
-
-            skin_face_landmarks = skin_face_results.multi_face_landmarks[0].landmark
-            skin_face_points = landmarks_to_array(skin_face_landmarks, skin_face_image.shape)
-
-            # Calculate Delaunay triangles for the skin face
-            rect = (0, 0, skin_face_image.shape[1], skin_face_image.shape[0])
-            delaunay_triangles = calculate_delaunay_triangles(rect, skin_face_points)
+        for skin_face_data in skin_faces_data:
+            skin_face_image = skin_face_data["image"]
+            skin_face_image_rgb = skin_face_data["image_rgb"]
+            skin_face_points = skin_face_data["points"]
+            delaunay_triangles = skin_face_data["delaunay_triangles"]
 
             # Copy triangle
             img_skin_face = np.copy(skin_face_image_rgb)
@@ -161,7 +190,7 @@ while True:
                 warp_triangle(user_face_image_rgb, img_skin_face, t1, t2)
 
             # Create mask for the skin face
-            skin_face_mask = create_face_mask(skin_face_image, skin_face_landmarks)
+            skin_face_mask = create_face_mask(skin_face_image, skin_face_data["landmarks"])
 
             # Check if the mask is in the correct shape
             if len(skin_face_mask.shape) == 2:
@@ -170,10 +199,14 @@ while True:
             # Feather the edges of the face mask (more ksize->smoother edges)
             face_mask = cv2.GaussianBlur(skin_face_mask, (101, 101), 5)
 
-            center_point = find_face_center(skin_face_landmarks, skin_face_image.shape)
+            center_point = find_face_center(skin_face_data["landmarks"], skin_face_image.shape)
 
             # Blend the images
             result = cv2.seamlessClone(img_skin_face, skin_face_image_rgb, face_mask, center_point, cv2.NORMAL_CLONE)
+
+            # Check if the skin face filename is '125.png' and flip the result horizontally
+            if skin_face_data["filename"] == '125.png':
+                result = cv2.rotate(result, cv2.ROTATE_180)  # 1 indicates flipping around y-axis (horizontal flip)
 
             # Create output directory if it does not exist
             output_directory = 'Outputs/'
@@ -181,7 +214,7 @@ while True:
 
             # Generate the output filename
             user_image_name = os.path.splitext(os.path.basename(user_face_path))[0]
-            output_filename = f"{user_image_name}_output_{output_counter}.jpg"
+            output_filename = f"{user_image_name}_{output_counter}.jpg"
 
             # Save the final image
             cv2.imwrite(os.path.join(output_directory, output_filename), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
@@ -192,11 +225,11 @@ while True:
                 output_counter = 1
 
             # Display the final result
-            plt.figure(figsize=(10, 10))
+            '''plt.figure(figsize=(10, 10))
             plt.imshow(result)
-            plt.title(f"Final Face - {skin_face_filename}")
+            plt.title(f"Final Face - {skin_face_data['filename']}")
             plt.axis('off')
-            plt.show()
+            plt.show()'''
 
         # Remove the processed user face image
         os.remove(user_face_path)
@@ -204,4 +237,4 @@ while True:
     # Wait for 10 seconds before checking again
     time.sleep(10)
 
-cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
